@@ -1,0 +1,9 @@
+first,second,Losing insurance,Median,95% UI Lower,95% UI Upper
+expansion,cbo-l,810880,244,1191,2454
+expansion,cbo-u,2027200,609,2977,6135
+expansion,ark-l,4510520,1356,6624,13650
+expansion,ark-u,5068000,1524,7443,15337
+total,cbo-l,1447520,435,2126,4381
+total,cbo-u,3618800,1088,5314,10951
+total,ark-l,8051830,2421,11825,24367
+total,ark-u,9047000,2720,13286,27378
