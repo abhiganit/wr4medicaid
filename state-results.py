@@ -3,6 +3,8 @@ import numpy as np
 import pandas as pd
 from itertools import product
 
+from scenarios import reporting_rate, automatic_exemption
+
 # create input criteria for scenarios:
 ## Choose age_upper_bound:
 state = 'Alabama'
@@ -34,11 +36,32 @@ def get_age_based_inputs(age_upper_bound):
 
 agerange0, ages0, agesD0 = get_age_based_inputs(age_upper_bound)
 
+### State-level Calculations:
+df = pd.read_excel('states.xlsx')
+# Read a file with state names and proportion of national population and at-risk population.
+
+
 # Same data can't be used to get what I want, though I can easily now
 pop_model = model.PopulationModel('data/np2023.csv',agerange0)
-# For each state, for population I can use another data to get population at state-level prpoortionally.
+pop = pop_model.get_population()
+# state-level proportion--
+# For each state, for population I can use another data to get population at state-level proportionally.
 
-## This is one big thingy that is working.
-ins_model = model.InsuranceModel('data/S2701 Selected Characteristics 2023.xlsx', ages0,'Alabama')
-
+# Keeping this constant at state-level
 death_model = model.DeathRateModel('data/Mortality Data 2021-2022.csv',agesD0)
+death_rate = death_model.compute_death_rate()
+
+automatic_exemption = 0.5 # depending on age-group
+reporting_rate = 0.18 # choice
+
+for state in df.index:
+    population = df.loc[state,'prop']*population
+    ins_model = model.InsuranceModel('data/S2701 Selected Characteristics 2023.xlsx', ages0, state)
+    pci = ins_model.compute_insurance_ratio()
+    sim = model.HealthImpactSimulator(1.4, [1.06, 1.84], population, pci,death_rate)
+    atrisk =  df.loc[state,''atrisk']
+    li = (1-reporting_rate)*(1-automatic_exemption)*atrisk
+    pui = sim.simulate_uninsurance(li)
+    excess = sim.compute_excess_deaths(pui, False)
+    df['excess_deaths'] = excess
+
