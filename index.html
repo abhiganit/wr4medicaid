@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Medicaid Work Requirements – Impact Explorer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Plotly -->
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+  <!-- PapaParse for CSV -->
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <style>
+    :root { --bg:#fafafa; --fg:#111; --muted:#6b7280; --panel:#fff; --bd:#e5e7eb; }
+    * { box-sizing:border-box; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin:0; padding:16px; background:var(--bg); color:var(--fg); }
+    .container { max-width: 1180px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 22px; }
+    .panel { background: var(--panel); border: 1px solid var(--bd); border-radius: 12px; padding: 16px; margin-top: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+    .row { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-end; }
+    .field { display:flex; flex-direction:column; gap:6px; min-width:220px; }
+    label { font-size:13px; color:#374151; }
+    select, input[type="range"] { width:100%; }
+    .kpi { font-weight:600; font-size:18px; margin-top:8px; }
+    #plot { width:100%; height:640px; }
+    .note { font-size:12px; color:var(--muted); margin-top:4px; }
+    .footer { margin-top: 8px; font-size:12px; color:var(--muted); }
+    .hidden { display:none !important; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>Medicaid Work Requirements – Impact Explorer</h1>
+
+  <!-- Controls -->
+  <div class="panel">
+    <div class="row">
+      <div class="field">
+        <label for="viewMode">View</label>
+        <select id="viewMode">
+          <option value="heat">Heatmap (grid)</option>
+          <option value="map">US Map (state medians)</option>
+        </select>
+        <div class="note">Switch between parameter grid and state choropleth.</div>
+      </div>
+
+      <div class="field heat-only" id="datasetField">
+        <label for="level">Dataset</label>
+        <select id="level">
+          <option value="National">National</option>
+        </select>
+        <div class="note">Pick National or a State (for heatmap).</div>
+      </div>
+
+      <div class="field heat-only" style="flex:1">
+        <label for="eff">Auto‑Exemption Efficiency: <span id="effVal">1.00</span></label>
+        <input id="eff" type="range" min="0" max="1" step="0.01" value="1" />
+      </div>
+
+      <div class="field heat-only" style="flex:1">
+        <label for="fail">Non‑compliance Rate: <span id="failVal">0.72</span></label>
+        <input id="fail" type="range" min="0.5" max="0.9" step="0.01" value="0.72" />
+      </div>
+
+      <div class="field map-only hidden" style="min-width:260px">
+        <label for="mapMetric">Map Metric</label>
+        <select id="mapMetric">
+          <option value="median">Total excess deaths (median)</option>
+          <option value="per_capita_median">Per‑capita excess deaths (median)</option>
+        </select>
+        <div class="note">Source: state_mortality_ci_Efficiency_based_Exemption.csv</div>
+      </div>
+    </div>
+    <div class="kpi" id="kpi">—</div>
+  </div>
+
+  <!-- Plot area -->
+  <div class="panel">
+    <div id="plot"></div>
+    <div class="footer" id="heatFooter">Colorbar: Excess Deaths (Annual). Axes: Auto‑Exemption Efficiency (x), Non‑compliance Rate (y).</div>
+    <div class="footer hidden" id="mapFooter">Choropleth of state median estimates. Use the selector to switch between total and per‑capita medians.</div>
+  </div>
+</div>
+
+<script>
+  // ======== PATHS (static, DreamHost-friendly) ========
+  const STATES_JSON_URL = 'results/states.json';
+  const NATIONAL_CSV   = 'results/national_mortality_grid.csv';
+  const STATE_CSV      = (s) => `results/${s}/mortality_grid.csv`;
+  const STATE_SUMMARY  = 'results/state_mortality_ci_Efficiency_based_Exemption.csv';
+
+  // ======== UI ELEMENTS ========
+  const viewModeSel = document.getElementById('viewMode');
+  const levelSel    = document.getElementById('level');
+  const effSlider   = document.getElementById('eff');
+  const failSlider  = document.getElementById('fail');
+  const effVal      = document.getElementById('effVal');
+  const failVal     = document.getElementById('failVal');
+  const kpi         = document.getElementById('kpi');
+  const mapMetricSel= document.getElementById('mapMetric');
+
+  const heatFooter  = document.getElementById('heatFooter');
+  const mapFooter   = document.getElementById('mapFooter');
+
+  const heatOnly    = Array.from(document.querySelectorAll('.heat-only'));
+  const mapOnly     = Array.from(document.querySelectorAll('.map-only'));
+
+  // ======== CACHES ========
+  const gridCache   = new Map(); // key: "National" or state dir name; value: pivot {xs[], ys[], Z}
+  let stateSummary  = null;      // { abbr: string[], name: string[], median: number[], per_capita_median: number[] }
+
+  // ======== BOOT ========
+  fetch(STATES_JSON_URL).then(r => r.json()).then(states => {
+    states.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s;
+      opt.textContent = s.replace(/_/g,' ');
+      levelSel.appendChild(opt);
+    });
+  }).catch(() => {
+    console.warn('states.json not found; only National available.');
+  }).finally(() => {
+    init();
+  });
+
+  function init(){
+    // listeners
+    effSlider.addEventListener('input', onHeatChange);
+    failSlider.addEventListener('input', onHeatChange);
+    levelSel.addEventListener('change', onLevelChange);
+    viewModeSel.addEventListener('change', onViewChange);
+    mapMetricSel.addEventListener('change', drawMap);
+
+    // initial
+    onViewChange();
+  }
+
+  // ======== VIEW SWITCH ========
+  function onViewChange(){
+    const mode = viewModeSel.value; // 'heat' | 'map'
+    const isHeat = mode === 'heat';
+    heatOnly.forEach(el => el.classList.toggle('hidden', !isHeat));
+    mapOnly.forEach(el  => el.classList.toggle('hidden',  isHeat));
+    heatFooter.classList.toggle('hidden', !isHeat);
+    mapFooter .classList.toggle('hidden',  isHeat);
+
+    if(isHeat){
+      onLevelChange();
+    } else {
+      loadStateSummary().then(drawMap).catch(err => {
+        console.error(err);
+        kpi.textContent = 'Could not load state medians.';
+        Plotly.purge('plot');
+      });
+    }
+  }
+
+  // ======== HEATMAP (grid) ========
+  function onHeatChange(){
+    effVal.textContent  = Number(effSlider.value).toFixed(2);
+    failVal.textContent = Number(failSlider.value).toFixed(2);
+    updateHeat();
+  }
+
+  function onLevelChange(){
+    const key = levelSel.value;
+    const url = (key === 'National') ? NATIONAL_CSV : STATE_CSV(key);
+    if(gridCache.has(key)){
+      updateHeat();
+      return;
+    }
+    loadGrid(url).then(pivot => {
+      gridCache.set(key, pivot);
+      drawHeat(pivot, key);
+      updateKPI(pivot);
+    }).catch(err => {
+      console.error(err);
+      kpi.textContent = 'Could not load dataset.';
+      Plotly.purge('plot');
+    });
+  }
+
+  function updateHeat(){
+    const key = levelSel.value;
+    const pivot = gridCache.get(key);
+    if(!pivot) return;
+    drawHeat(pivot, key);
+    updateKPI(pivot);
+  }
+
+  function loadGrid(url){
+    return new Promise((resolve, reject) => {
+      Papa.parse(url, {
+        download: true,
+        header: true,
+        dynamicTyping: true,
+        complete: (res) => {
+          try{
+            const rows = res.data.filter(r => r && r.efficiency != null && r.failure_to_report != null && r.median != null);
+            const xs = Array.from(new Set(rows.map(r => +r.efficiency))).sort((a,b)=>a-b);
+            const ys = Array.from(new Set(rows.map(r => +r.failure_to_report))).sort((a,b)=>a-b);
+            const Z = ys.map(() => xs.map(() => NaN));
+            rows.forEach(r => {
+              const xi = xs.indexOf(+r.efficiency);
+              const yi = ys.indexOf(+r.failure_to_report);
+              if (xi>=0 && yi>=0) Z[yi][xi] = +r.median;
+            });
+            resolve({ xs, ys, Z });
+          } catch(e){ reject(e); }
+        },
+        error: (err) => reject(err)
+      });
+    });
+  }
+
+  function drawHeat(pivot, key){
+    const { xs, ys, Z } = pivot;
+    const heat = [{
+      type: 'contour', x: xs, y: ys, z: Z,
+      contours: { coloring: 'heatmap', showlines: true },
+      colorscale: 'Viridis',
+      colorbar: { title: 'Excess Deaths (Annual)' }
+    }];
+    const eff = +effSlider.value; const fail = +failSlider.value;
+    const marker = { x:[eff], y:[fail], mode:'markers+text', text:['Selected'], textposition:'bottom right', marker:{color:'red', size:10} };
+    const layout = {
+      title: (key === 'National' ? 'National Excess Mortality (Annual)' : key.replace(/_/g,' ') + ' – Excess Mortality (Annual)'),
+      margin: { l:50, r:10, t:40, b:50 },
+      xaxis: { title: 'Auto‑Exemption Efficiency', range:[Math.min(...xs), Math.max(...xs)] },
+      yaxis: { title: 'Non‑compliance Rate',     range:[Math.min(...ys), Math.max(...ys)] }
+    };
+    Plotly.newPlot('plot', [...heat, marker], layout, {displaylogo:false, responsive:true});
+  }
+
+  function updateKPI(pivot){
+    const value = bilinear(pivot, +effSlider.value, +failSlider.value);
+    kpi.textContent = `Estimated Excess Deaths: ${fmt0(value)}`;
+  }
+
+  function bilinear(pivot, x, y){
+    const xs=pivot.xs, ys=pivot.ys, Z=pivot.Z;
+    const clamp=(v,lo,hi)=>Math.min(Math.max(v,lo),hi);
+    x = clamp(x, xs[0], xs[xs.length-1]);
+    y = clamp(y, ys[0], ys[ys.length-1]);
+    let xi=0; while(xi+1<xs.length && xs[xi+1]<=x) xi++;
+    let yi=0; while(yi+1<ys.length && ys[yi+1]<=y) yi++;
+    const x1=xs[xi], x2=xs[Math.min(xi+1,xs.length-1)];
+    const y1=ys[yi], y2=ys[Math.min(yi+1,ys.length-1)];
+    const Q11=Z[yi][xi];
+    const Q21=Z[yi][Math.min(xi+1,xs.length-1)];
+    const Q12=Z[Math.min(yi+1,ys.length-1)][xi];
+    const Q22=Z[Math.min(yi+1,ys.length-1)][Math.min(xi+1,xs.length-1)];
+    if(x2===x1 && y2===y1) return Q11;
+    if(x2===x1) return Q11 + (Q12-Q11)*(y-y1)/(y2-y1);
+    if(y2===y1) return Q11 + (Q21-Q11)*(x-x1)/(x2-x1);
+    return (
+      Q11*(x2-x)*(y2-y)/((x2-x1)*(y2-y1)) +
+      Q21*(x-x1)*(y2-y)/((x2-x1)*(y2-y1)) +
+      Q12*(x2-x)*(y-y1)/((x2-x1)*(y2-y1)) +
+      Q22*(x-x1)*(y-y1)/((x2-x1)*(y2-y1))
+    );
+  }
+
+  // ======== MAP (state medians) ========
+  function loadStateSummary(){
+    if(stateSummary) return Promise.resolve(stateSummary);
+    return new Promise((resolve, reject) => {
+      Papa.parse(STATE_SUMMARY, {
+        download:true,
+        header:true,
+        dynamicTyping:true,
+        complete: (res) => {
+          try{
+            // Expect columns: state (full name) OR abbr (2-letter), median, per_capita_median
+            const rows = res.data.filter(r => r && (r.abbr || r.state) && (r.median!=null || r.per_capita_median!=null));
+            const out = { abbr:[], name:[], median:[], per_capita_median:[] };
+            rows.forEach(r => {
+              const abbr = (r.abbr || nameToAbbr[r.state])?.toString().toUpperCase();
+              const name = r.state || (abbrToName[abbr]||abbr);
+              if(!abbr || !usStates.has(abbr)) return; // skip non-states
+              out.abbr.push(abbr);
+              out.name.push(name);
+              out.median.push(+r.median);
+              out.per_capita_median.push(+r.per_capita_median);
+            });
+            stateSummary = out;
+            resolve(out);
+          } catch(e){ reject(e); }
+        },
+        error: (err) => reject(err)
+      });
+    });
+  }
+
+  function drawMap(){
+    if(!stateSummary) return;
+    const metric = mapMetricSel.value; // 'median' | 'per_capita_median'
+    const z = stateSummary[metric];
+    const text = stateSummary.name.map((nm,i)=>
+      `${nm}<br>Total median: ${fmt0(stateSummary.median[i])}<br>Per‑capita median: ${fmt1(stateSummary.per_capita_median[i])}`);
+
+    const data = [{
+      type: 'choropleth',
+      locationmode: 'USA-states',
+      locations: stateSummary.abbr,
+      z: z,
+      colorscale: 'Viridis',
+      colorbar: { title: metric==='median' ? 'Excess Deaths (median)' : 'Per‑capita (median)' },
+      text: text,
+      hoverinfo: 'text+z'
+    }];
+
+    const layout = {
+      title: 'State Median Excess Mortality',
+      geo: { scope:'usa', projection:{type:'albers usa'}, showlakes:true, lakecolor:'#e5f3ff' },
+      margin:{l:10,r:10,t:40,b:10}
+    };
+
+    Plotly.newPlot('plot', data, layout, {displaylogo:false, responsive:true});
+    kpi.textContent = metric==='median' ? 'Map: Total excess deaths (median) by state' : 'Map: Per‑capita excess deaths (median) by state';
+  }
+
+  // ======== HELPERS ========
+  function fmt0(n){ return (isFinite(n)? Math.round(n).toLocaleString(): '—'); }
+  function fmt1(n){ return (isFinite(n)? n.toFixed(2) : '—'); }
+
+  // Minimal US state sets/mappings (to accept either names or abbr in CSV)
+  const usStates = new Set(['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC']);
+  const nameToAbbr = {
+    'Alabama':'AL','Alaska':'AK','Arizona':'AZ','Arkansas':'AR','California':'CA','Colorado':'CO','Connecticut':'CT','Delaware':'DE','Florida':'FL','Georgia':'GA','Hawaii':'HI','Idaho':'ID','Illinois':'IL','Indiana':'IN','Iowa':'IA','Kansas':'KS','Kentucky':'KY','Louisiana':'LA','Maine':'ME','Maryland':'MD','Massachusetts':'MA','Michigan':'MI','Minnesota':'MN','Mississippi':'MS','Missouri':'MO','Montana':'MT','Nebraska':'NE','Nevada':'NV','New Hampshire':'NH','New Jersey':'NJ','New Mexico':'NM','New York':'NY','North Carolina':'NC','North Dakota':'ND','Ohio':'OH','Oklahoma':'OK','Oregon':'OR','Pennsylvania':'PA','Rhode Island':'RI','South Carolina':'SC','South Dakota':'SD','Tennessee':'TN','Texas':'TX','Utah':'UT','Vermont':'VT','Virginia':'VA','Washington':'WA','West Virginia':'WV','Wisconsin':'WI','Wyoming':'WY','District of Columbia':'DC'
+  };
+  const abbrToName = Object.fromEntries(Object.entries(nameToAbbr).map(([k,v])=>[v,k]));
+</script>
+</body>
+</html>
