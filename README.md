@@ -7,10 +7,10 @@ This project is licensed under the GNU AFFERO GENERAL PUBLIC LICENSE. See [`LICE
 
 This repository contains simulation and visualization code for 
 quantifying the mortality and morbidity impacts of Medicaid work 
-requirements in the United States. The analysis explores the 
-consequences of insurance loss under various exemption and 
-compliance scenarios using population data, disease control 
-rates, and hazard ratios.
+requirements in the United States. The analysis evaluates the 
+consequences of insurance loss under varying exemption and 
+compliance scenarios, using population data, disease control 
+rates, and hazard ratios. An interactive dashboard presenting the results is hosted by [CIDMA](https://medicaid.cidma.us/).
 
 
 ---
